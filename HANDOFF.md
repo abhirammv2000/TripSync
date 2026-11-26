@@ -6,8 +6,8 @@ Welcome to the TripSync project! This document serves as a comprehensive referen
 TripSync is an AI-powered group travel planning application that takes the headache out of coordinating trips with friends. It collects individual preferences (vacation vibes, budget, dietary restrictions, dealbreakers) either via a web form or a conversational voice assistant. Using Gemini AI, it synthesizes the group's preferences into an optimal destination recommendation and generates a detailed, conflict-free, budget-aware day-by-day itinerary. It also features ElevenLabs text-to-speech to narrate the final itinerary to the group.
 
 ## Tech Stack
-- **Framework:** Next.js 15.0.3 (App Router)
-- **UI Library:** React 19.0.0
+- **Framework:** Next.js 16.1.6 (App Router)
+- **UI Library:** React 19.2.3
 - **Styling:** Tailwind CSS 4 (via `@tailwindcss/postcss`)
 - **Database & Auth:** Supabase (Auth, Postgres DB)
 - **AI / LLM:** Google Gemini 3.1 Pro Preview (via `@google/generative-ai`)
@@ -122,17 +122,19 @@ cd ~/HackCU-TripAi && git pull origin main && npm run build && pm2 restart trips
 - **`users`**
   - `id` (uuid, PK), `email`, `name`, `avatar_url`, `created_at`
 - **`trips`**
-  - `id` (uuid, PK), `share_code`, `tagline`, `destination`, `origin_city`, `start_date`, `end_date`, `trip_duration_days`, `group_size`, `leader_id` (FK), `status` (collecting, synthesis, complete)
+  - `id` (uuid, PK), `share_code`, `tagline`, `destination`, `origin_city`, `start_date`, `end_date`, `trip_duration_days`, `group_size`, `leader_id` (FK), `status` (collecting, ready, planning, complete)
 - **`trip_members`**
   - `id`, `trip_id` (FK), `user_id` (FK), `role`
 - **`preferences`**
   - `id`, `trip_id`, `user_id`, `budget_min`, `budget_max`, `vibe_beach`, `vibe_city`, `vibe_nature`, `vibe_culture`, `vibe_relaxation`, `vibe_nightlife`, `vibe_adventure`, `dietary_restrictions`, `activity_level`, `accommodation_pref`, `must_haves`, `dealbreakers`, `additional_notes`
-- **`trip_synthesis`**
-  - `id`, `trip_id`, `synthesis_data` (jsonb)
 - **`location_recommendations`**
   - `id`, `trip_id`, `destination`, `score`, `reasoning`, `pros`, `cons`, `estimated_budget_pp`
 - **`itineraries`**
   - `id`, `trip_id`, `destination`, `itinerary_data` (jsonb), `budget_breakdown` (jsonb)
+
+There is no `trip_synthesis` table. The group profile is returned to the browser by `/synthesize` and sent back in the next request.
+
+**Privacy:** `preferences` is readable only by its owner (see `supabase/migrations/20261126_private_preferences.sql`). The leader routes (`synthesize`, `recommend-locations`, `generate-itinerary`) read every member's row through `src/lib/supabase/admin.ts`, which needs `SUPABASE_SERVICE_ROLE_KEY`. The itinerary page loads only the signed-in member's own budget.
 
 ## API Routes
 | Method | Route | Description | Auth Required |
