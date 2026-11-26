@@ -2,6 +2,9 @@ import { createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import { askGeminiJSON } from "@/lib/gemini";
 import { destinations as US_DESTINATIONS } from "@/lib/destinations";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { recommendationsSchema, validator } from "@/lib/schemas";
+import { filterAffordable, lowestBudgetMember } from "@/lib/budget";
 
 const SYSTEM_PROMPT = `You are TripSync's destination matcher. Given a group travel profile and a dataset of US destinations, score each destination and return the top 3-4 as JSON.
 
@@ -23,6 +26,7 @@ Rules:
 - Score 0-100 based on fit with group preferences
 - Reference specific group members by name in pros/cons
 - Be honest about tradeoffs — don't oversell
+- PRIVACY: never state an individual member's exact budget or say which member has the lowest budget. Say "the group's budget" instead. Member names are fine for interests and dietary needs.
 - If a destination doesn't accommodate someone's dealbreaker, exclude it
 - estimatedBudgetPerPerson should match the trip duration
 - Sort by score descending`;
@@ -68,6 +72,18 @@ export async function POST(
         return NextResponse.json({ error: "Synthesis data required" }, { status: 400 });
     }
 
+    // Members can only read their own preferences, so the leader's route reads
+    // everyone's budgets through the server-only admin client (leader verified above).
+    let admin;
+    try {
+        admin = createAdminClient();
+    } catch (err) {
+        return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Server is not configured" },
+            { status: 500 }
+        );
+    }
+
     // If trip already has a destination, only recommend that one
     const destinationDataset = trip.destination
         ? US_DESTINATIONS.filter(
@@ -97,18 +113,19 @@ ${JSON.stringify(
     )}`;
 
     try {
-        const result = await askGeminiJSON<{ recommendations: Recommendation[] }>(
+        const result = await askGeminiJSON(
             SYSTEM_PROMPT,
             userMessage,
             2,
-            true // Enable Google Search grounding
+            true, // Enable Google Search grounding
+            validator(recommendationsSchema)
         );
 
-        let recommendations = result.recommendations || [];
+        let recommendations: Recommendation[] = result.recommendations;
 
         // ── Budget feasibility check ──
         // Fetch all member budgets to find the lowest
-        const { data: preferences } = await supabase
+        const { data: preferences } = await admin
             .from("preferences")
             .select("user_id, budget_max")
             .eq("trip_id", tripId);
@@ -128,16 +145,13 @@ ${JSON.stringify(
                 };
             }) || [];
 
-        if (memberBudgets.length > 0) {
-            const lowestBudgetMember = memberBudgets.reduce((min, m) =>
-                m.budget < min.budget ? m : min
-            );
-            const lowestBudget = lowestBudgetMember.budget;
+        const lowestBudgetMemberFound = lowestBudgetMember(memberBudgets);
+
+        if (lowestBudgetMemberFound) {
+            const lowestBudget = lowestBudgetMemberFound.budget;
 
             // Filter out destinations over the lowest budget
-            const affordable = recommendations.filter(
-                (rec) => rec.estimatedBudgetPerPerson <= lowestBudget
-            );
+            const affordable = filterAffordable(recommendations, lowestBudget);
 
             if (affordable.length === 0 && recommendations.length > 0) {
                 // All destinations exceed the lowest budget
@@ -148,10 +162,9 @@ ${JSON.stringify(
                 return NextResponse.json({
                     status: "budget_insufficient",
                     lowest_budget: lowestBudget,
-                    lowest_budget_member: lowestBudgetMember.name,
                     cheapest_destination: cheapest.name,
                     cheapest_estimated_cost: cheapest.estimatedBudgetPerPerson,
-                    message: `The most affordable matching destination (${cheapest.name}) would cost ~$${cheapest.estimatedBudgetPerPerson}/person, but ${lowestBudgetMember.name}'s budget is $${lowestBudget}.`,
+                    message: `The most affordable matching destination (${cheapest.name}) would cost ~$${cheapest.estimatedBudgetPerPerson}/person, but the group's lowest budget is $${lowestBudget}.`,
                     options: [
                         `Increase the minimum budget to $${cheapest.estimatedBudgetPerPerson}`,
                         "Adjust preferences to unlock cheaper destinations",

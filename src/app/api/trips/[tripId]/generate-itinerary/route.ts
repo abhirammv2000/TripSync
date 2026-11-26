@@ -1,6 +1,14 @@
 import { createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import { askGeminiJSON } from "@/lib/gemini";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { itinerarySchema, validator } from "@/lib/schemas";
+import {
+  findOverages,
+  overageFeedback,
+  totalOverage,
+  type MemberBudget,
+} from "@/lib/budget";
 
 const SYSTEM_PROMPT = `You are TripSync's itinerary planner. Create a day-by-day trip plan as JSON matching this exact schema:
 
@@ -95,6 +103,8 @@ GROUNDING: You have access to Google Search. USE IT to verify every hotel, resta
 
 For flight cost estimates, search for typical flight costs to the destination to get realistic fare estimates. Reference the airports by their IATA codes.
 
+PRIVACY: in descriptions and reasoning, never state an individual member's exact budget or say whose budget is lowest. Only the budget_summary totals may differ per person.
+
 BUDGET IS A HARD CONSTRAINT. Always try to keep each person's total cost at or below their stated budget. If it's impossible to stay within everyone's budget for this destination, prioritize keeping costs down and suggest where each person can cut costs. Never silently exceed someone's budget — always flag it explicitly.
 
 If any member's total estimated cost exceeds their stated budget, suggest specific cost-saving alternatives for that person. For example: a cheaper hotel option, free activities that replace paid ones, or budget meal alternatives. Include these as a "savings_tips" field for the affected members in the budget_summary.per_person object.`;
@@ -137,8 +147,20 @@ export async function POST(
     );
   }
 
+  // Members can only read their own preferences, so the leader's route reads
+  // everyone's through the server-only admin client (leader verified above).
+  let admin;
+  try {
+    admin = createAdminClient();
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Server is not configured" },
+      { status: 500 }
+    );
+  }
+
   // Fetch all preferences with user names
-  const { data: preferences } = await supabase
+  const { data: preferences } = await admin
     .from("preferences")
     .select("*")
     .eq("trip_id", tripId);
@@ -182,53 +204,44 @@ ${trip.start_date ? `Start Date: ${trip.start_date}` : ""}
 ${trip.end_date ? `End Date: ${trip.end_date}` : ""}`;
 
   try {
-    const itinerary = await askGeminiJSON(SYSTEM_PROMPT, userMessage, 2, true);
+    const validate = validator(itinerarySchema);
+    let itinerary = await askGeminiJSON(SYSTEM_PROMPT, userMessage, 2, true, validate);
 
-    // ── Budget warnings: compare each member's total to their stated budget ──
-    const budgetWarnings: {
-      user: string;
-      budget: number;
-      estimated_total: number;
-      over_by: number;
-      suggestion: string;
-    }[] = [];
-
-    const budgetSummary = (itinerary as any)?.budget_summary;
-    if (budgetSummary?.per_person && preferences) {
-      for (const pref of preferences) {
+    // ── Budget check: compare each member's total to their own stated budget ──
+    const memberBudgets: MemberBudget[] = (preferences || [])
+      .filter((pref) => pref.budget_max != null)
+      .map((pref) => {
         const u = users?.find((u) => u.id === pref.user_id);
-        const memberName = u?.name || u?.email?.split("@")[0] || "Unknown";
-        const memberBudget = pref.budget_max;
+        return {
+          name: u?.name || u?.email?.split("@")[0] || "Unknown",
+          budget: pref.budget_max as number,
+        };
+      });
 
-        if (memberBudget == null) continue;
+    let budgetWarnings = findOverages(itinerary, memberBudgets);
 
-        // Find this member in the budget summary (match by name, fallback to case-insensitive)
-        let memberSummary = budgetSummary.per_person[memberName];
-        if (!memberSummary) {
-          const key = Object.keys(budgetSummary.per_person).find(
-            (k) => k.toLowerCase() === memberName.toLowerCase()
-          );
-          if (key) {
-            memberSummary = budgetSummary.per_person[key];
-          }
+    // If anyone is over, ask the model once to fix it. Keep the revision only
+    // if it is closer to budget than the first plan; otherwise keep the first.
+    if (budgetWarnings.length > 0) {
+      try {
+        const revised = await askGeminiJSON(
+          SYSTEM_PROMPT,
+          userMessage + overageFeedback(budgetWarnings),
+          1,
+          true,
+          validate
+        );
+        const revisedWarnings = findOverages(revised, memberBudgets);
+        if (totalOverage(revisedWarnings) < totalOverage(budgetWarnings)) {
+          itinerary = revised;
+          budgetWarnings = revisedWarnings;
         }
-        if (!memberSummary) continue;
-
-        const estimatedTotal = memberSummary.total;
-        if (estimatedTotal > memberBudget) {
-          const overBy = estimatedTotal - memberBudget;
-          const savingsTips = memberSummary.savings_tips;
-          budgetWarnings.push({
-            user: memberName,
-            budget: memberBudget,
-            estimated_total: estimatedTotal,
-            over_by: overBy,
-            suggestion: savingsTips ||
-              `${memberName} could save ~$${overBy} by choosing budget-friendly options for accommodation and meals.`,
-          });
-        }
+      } catch (err) {
+        console.warn("Budget revision failed, keeping the first plan:", err);
       }
     }
+
+    const budgetSummary = itinerary.budget_summary;
 
     // Save to DB
     const { error: saveError } = await supabase.from("itineraries").insert({
@@ -241,7 +254,13 @@ ${trip.end_date ? `End Date: ${trip.end_date}` : ""}`;
     });
 
     if (saveError) {
+      // Do not mark the trip complete or report success: the user would be sent
+      // to an itinerary page that has nothing to show.
       console.error("Save itinerary error:", saveError);
+      return NextResponse.json(
+        { error: "The itinerary was generated but could not be saved. Please try again." },
+        { status: 500 }
+      );
     }
 
     // Update trip status

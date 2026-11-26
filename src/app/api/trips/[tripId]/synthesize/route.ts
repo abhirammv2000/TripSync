@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { NextResponse } from "next/server";
 import { askGeminiJSON } from "@/lib/gemini";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { synthesisSchema, validator } from "@/lib/schemas";
 
 const SYSTEM_PROMPT = `You are TripSync's preference analyst. Given individual travel preferences from a group of friends, analyze and output JSON with this exact schema:
 
@@ -28,7 +30,7 @@ const SYSTEM_PROMPT = `You are TripSync's preference analyst. Given individual t
   "humanSummary": "2-3 sentence friendly summary of the group dynamic"
 }
 
-Use the actual member names in your analysis. Be honest about conflicts.`;
+Use the actual member names in your analysis. Be honest about conflicts, but never state an individual member's exact budget in humanSummary, commonGround or conflicts. Say "the group's budget" instead.`;
 
 export async function POST(
     request: Request,
@@ -55,8 +57,18 @@ export async function POST(
         return NextResponse.json({ error: "Only the leader can synthesize" }, { status: 403 });
     }
 
-    // Fetch all preferences with user info
-    const { data: preferences } = await supabase
+    // Members can only read their own preferences, so the leader's route reads
+    // everyone's through the server-only admin client (leader verified above).
+    let admin;
+    try {
+        admin = createAdminClient();
+    } catch (err) {
+        return NextResponse.json(
+            { error: err instanceof Error ? err.message : "Server is not configured" },
+            { status: 500 }
+        );
+    }
+    const { data: preferences } = await admin
         .from("preferences")
         .select("*")
         .eq("trip_id", tripId);
@@ -99,7 +111,13 @@ export async function POST(
     const userMessage = `Here are the individual travel preferences for a group of ${preferences.length} friends planning a ${trip.trip_duration_days || 4}-day trip:\n\n${JSON.stringify(prefsWithNames, null, 2)}`;
 
     try {
-        const synthesis = await askGeminiJSON(SYSTEM_PROMPT, userMessage);
+        const synthesis = await askGeminiJSON(
+            SYSTEM_PROMPT,
+            userMessage,
+            2,
+            false,
+            validator(synthesisSchema)
+        );
         return NextResponse.json({ synthesis });
     } catch (err) {
         console.error("Synthesis error:", err);

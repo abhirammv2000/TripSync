@@ -52,7 +52,6 @@ export default function LocationsClient({
     const [budgetWarning, setBudgetWarning] = useState<{
         message: string;
         lowest_budget: number;
-        lowest_budget_member: string;
         cheapest_destination: string;
         cheapest_estimated_cost: number;
         options: string[];
