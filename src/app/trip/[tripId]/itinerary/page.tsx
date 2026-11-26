@@ -53,22 +53,20 @@ export default async function ItineraryPage({ params }: ItineraryPageProps) {
         .select("id, name, avatar_url, email")
         .in("id", memberIds);
 
-    // Fetch member budgets for comparison
-    const { data: preferences } = await supabase
+    // Budgets are private. Only the signed-in member's own budget is loaded,
+    // so the page can compare the plan with it. Other members' budgets are
+    // never sent to the browser (row level security also blocks reading them).
+    const { data: ownPreference } = await supabase
         .from("preferences")
-        .select("user_id, budget_max")
-        .eq("trip_id", tripId);
+        .select("budget_max")
+        .eq("trip_id", tripId)
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-    const memberBudgets: Record<string, number> = {};
-    if (preferences && users) {
-        for (const pref of preferences) {
-            if (pref.budget_max != null) {
-                const u = users.find((u) => u.id === pref.user_id);
-                const name = u?.name || u?.email?.split("@")[0] || "Unknown";
-                memberBudgets[name] = pref.budget_max;
-            }
-        }
-    }
+    const ownUser = users?.find((u) => u.id === user.id);
+    const ownName = ownUser?.name || ownUser?.email?.split("@")[0] || "Unknown";
+    const memberBudgets: Record<string, number> =
+        ownPreference?.budget_max != null ? { [ownName]: ownPreference.budget_max } : {};
 
     // Get current user's name for My Schedule filter
     const currentUserObj = users?.find((u) => u.id === user.id);

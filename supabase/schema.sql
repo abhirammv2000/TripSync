@@ -130,9 +130,11 @@ CREATE POLICY "Authenticated users can join trips" ON trip_members FOR INSERT
 CREATE POLICY "Members can update own membership" ON trip_members FOR UPDATE
   USING (auth.uid() = user_id);
 
--- Preferences: own data + co-members can view (using non-recursive check)
-CREATE POLICY "Users can view trip preferences" ON preferences FOR SELECT
-  USING (true);
+-- Preferences are private: a member can only read their own row.
+-- The leader's server routes read everyone's through the service role key,
+-- which bypasses row level security (see src/lib/supabase/admin.ts).
+CREATE POLICY "Users can view own preferences" ON preferences FOR SELECT
+  USING (auth.uid() = user_id);
 CREATE POLICY "Users can insert own preferences" ON preferences FOR INSERT
   WITH CHECK (auth.uid() = user_id);
 CREATE POLICY "Users can update own preferences" ON preferences FOR UPDATE
